@@ -2,8 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\UpdatePassengerRequest;
 use App\Models\Passenger;
 use Illuminate\Http\Request;
+use Stripe\Customer;
+use Stripe\Exception\ApiErrorException;
+use Stripe\Stripe;
 
 
 
@@ -13,23 +17,9 @@ class PassengerController extends Controller
     /**
      * Display a listing of the resource.
      */
-
-    /**
-     * @OA\Get(
-     *     path="/api/passengers",
-     *     summary="Get All Passengers",
-     *     description="Fetches all passengers with their associated rides",
-     *     @OA\Response(
-     *         response=200,
-     *         description="A list of passengers"
-     *      
-     *     ),
-     *     @OA\Response(response=404, description="No passengers found")
-     * )
-     */
     public function index()
     {
-        $passengers = Passenger::with('rides')->get();
+        $passengers = Passenger::with(['rides', 'feedbacks'])->get();
 
         if ($passengers->isEmpty()) {
             return response()->json([
@@ -44,25 +34,6 @@ class PassengerController extends Controller
      * Display the specified resource.
      */
 
-    /**
-     * @OA\Get(
-     *     path="/api/passengers/{passengerID}",
-     *     summary="Get a specific passenger",
-     *     description="Fetches a passenger by ID along with their associated rides",
-     *     @OA\Parameter(
-     *         name="passengerID",
-     *         in="path",
-     *         description="ID of the passenger",
-     *         required=true,
-     *         @OA\Schema(type="integer")
-     *     ),
-     *     @OA\Response(
-     *         response=200,
-     *         description="Details of the specific passenger"
-     *     ),
-     *     @OA\Response(response=404, description="Passenger not found")
-     * )
-     */
     public function show($passenger)
     {
         // Retrieve the driver and load the related rides
@@ -88,39 +59,24 @@ class PassengerController extends Controller
     /**
      * Update the specified resource in storage.
      */
-    public function update(Request $request, Passenger $passenger)
+    public function update(UpdatePassengerRequest $request, Passenger $passenger)
     {
-        //
+        $fields = $request->validated();
+        if (!$passenger) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Passenger not found.'
+            ], 404);
+        }
+
+        $passenger->update($fields);
+        return response()->json($passenger, 200);
     }
 
     /**
      * Remove the specified resource from storage.
      */
 
-    /**
-     * @OA\Delete(
-     *     path="/api/passengers",
-     *     summary="Delete multiple passengers",
-     *     description="Deletes multiple passengers by their IDs",
-     *     @OA\RequestBody(
-     *         required=true,
-     *         @OA\JsonContent(
-     *             required={"passenger_ids"},
-     *             @OA\Property(property="passenger_ids", type="array", @OA\Items(type="integer", example=1))
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=200,
-     *         description="Passengers successfully deleted",
-     *         @OA\JsonContent(
-     *             type="object",
-     *             @OA\Property(property="success", type="boolean", example=true),
-     *             @OA\Property(property="message", type="string", example="2 passengers deleted successfully.")
-     *         )
-     *     ),
-     *     @OA\Response(response=404, description="No passengers found to delete")
-     * )
-     */
     public function destroy(Request $request)
     {
         // Validate that the 'passenger_ids' field exists and is an array
@@ -129,21 +85,33 @@ class PassengerController extends Controller
             'passenger_ids.*' => 'exists:passengers,id',  // Ensuring each ID exists in the passengers table
         ]);
 
+        Stripe::setApiKey(config('services.stripe.secret'));
+
         $passengers = Passenger::whereIn('id', $validated['passenger_ids'])->get();
 
-        // Use the validated IDs to delete the passengers
-
-        foreach ($passengers as $passenger) {
-            // Delete all tokens associated with this passenger
+        $passengers->each(function ($passenger) {
             $passenger->tokens->each(function ($token) {
                 $token->delete();
             });
+        });
+
+        $customerIds = $passengers->pluck('customer_id')->filter();
+        try {
+            foreach ($customerIds as $customerId) {
+                Customer::retrieve($customerId)->delete();
+            }
+        } catch (ApiErrorException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => "Failed to delete customers. " . $e->getMessage(),
+            ], 500);
         }
+        $deletedCount = $passengers->each->delete()->count();
 
-        $deletedCount = Passenger::whereIn('id', $validated['passenger_ids'])->delete();
 
 
-        if ($deletedCount) {
+
+        if ($deletedCount > 0) {
             return response()->json([
                 'success' => true,
                 'message' => "{$deletedCount} passenger(s) deleted successfully.",

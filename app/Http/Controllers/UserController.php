@@ -2,9 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\DriverController;
 use App\Models\Driver;
 use App\Notifications\DriverVerficationNotification;
-use Illuminate\Http\Request;
 use Notification;
 
 class UserController extends Controller
@@ -16,23 +16,17 @@ class UserController extends Controller
         if (!$driver) {
             return response()->json(['error' => 'Driver not found'], 404);
         }
-        // Check if the driver is already verified
+
         if ($driver->is_verified == 1) {
             return response()->json([
                 'message' => 'Driver has already been verified.'
             ], 400);
         }
 
-        if ($driver->is_verified == 0) {
-            return response()->json([
-                'message' => 'Driver has already been declined.'
-            ], 400);
-        }
-
-        // Verify the driver and save the changes
-        $driver->verify();
+        $driver->is_verified = 1;
         $driver->save();
-        Notification::send($driver, new DriverVerficationNotification(['message' => 'You account has been verified!', 'is_verified' => 1]));
+
+        Notification::send($driver, new DriverVerficationNotification(['message' => 'Good News Your Account Has Been Verified. Login Now!']));
 
         return response()->json([
             'message' => 'Driver verified successfully.',
@@ -54,21 +48,16 @@ class UserController extends Controller
             ], 400);
         }
 
-        if ($driver->is_verified == 0) {
-            return response()->json([
-                'message' => 'Driver has already been declined.'
-            ], 400);
-        }
+        Notification::send($driver, new DriverVerficationNotification(['message' => 'Sorry You account has been declined.']));
 
-        // Verify the driver and save the changes
-        $driver->decline();
-        $driver->save();
-        Notification::send($driver, new DriverVerficationNotification(['message' => 'You account has been declined!', 'is_verified' => 0]));
+        $driver->deleteLicense();
+
+        $driver->delete();
+
 
         return response()->json([
-            'message' => 'Driver declined successfully.',
-            'is_verified' => 0,
-            'driver' => $driver
+            'message' => 'Driver declined.',
+            'success' => true
         ], 200);
     }
 

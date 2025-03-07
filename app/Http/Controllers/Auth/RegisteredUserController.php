@@ -4,16 +4,20 @@ namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
 use App\Models\OTP;
+use App\Models\Passenger;
 use App\Models\User;
 use App\Notifications\NewDriverNotification;
 use App\Notifications\OTPNotification;
 use App\Notifications\PassengerVerficationNotification;
 use App\OTPService;
-use Illuminate\Auth\Events\Registered;
+use App\ResponseMessageService;
+use DB;
+use Exception;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Auth;
+use Log;
 use Notification;
 use Response;
+use Storage;
 
 class RegisteredUserController extends Controller
 {
@@ -22,18 +26,19 @@ class RegisteredUserController extends Controller
      *
      * @throws \Illuminate\Validation\ValidationException
      */
-    public function __construct(private OTPService $otpService)
+    public function __construct(private OTPService $otpService, private ResponseMessageService $responseMessageService)
     {
     }
 
     private function createUser(array $data, $userType)
     {
         if ($userType === 'driver') {
-            $data['insurance_info'] = json_encode($data['insurance_info']);
-            $data['registration_info'] = json_encode($data['registration_info']);
+            $data['id_card_image'] = json_encode($data['id_card_image']);
+            $data['driving_license_image'] = json_encode($data['driving_license_image']);
+            $data['license_image'] = json_encode($data['license_image']);
         }
         $userModel = match ($userType) {
-            'passenger' => \App\Models\Passenger::class,
+            'passenger' => Passenger::class,
             'driver' => \App\Models\Driver::class,
             'admin' => User::class,
         };
@@ -71,55 +76,77 @@ class RegisteredUserController extends Controller
                 'license_plate' => 'required|string|max:50|unique:drivers,license_plate',
                 'car_color' => 'required|string|max:50',
                 'manufacturing_year' => 'required|digits:4|integer|min:1900|max:' . date('Y'),
-                'insurance_info' => 'required',
-                'registration_info' => 'required',
+                'license_image.front' => 'required|image|mimes:jpeg,png,jpg|max:2048',
+                'license_image.back' => 'required|image|mimes:jpeg,png,jpg|max:2048',
+                'driving_license_image.front' => 'required|image|mimes:jpeg,png,jpg|max:2048',
+                'driving_license_image.back' => 'required|image|mimes:jpeg,png,jpg|max:2048',
+                'id_card_image.front' => 'required|image|mimes:jpeg,png,jpg|max:2048',
+                'id_card_image.back' => 'required|image|mimes:jpeg,png,jpg|max:2048',
+
             ], ['email.regex' => 'The email must be a valid Gmail address.']),
             'admin' => $request->validate([
                 'email' => 'required|email|unique:users,email|regex:/^[a-zA-Z0-9._%+-]+@gmail\.com$/'
             ], ['email.regex' => 'The email must be a valid Gmail address.']),
         };
 
-        $user = $this->createUser(
-            array_merge($data, $additionalFields),
-            $data['user_type']
-        );
+        if ($data['user_type'] === 'driver') {
+            $storagePath = 'driver_licenses/' . $additionalFields['email'];
+
+            $additionalFields['license_image']['front'] = $request->file('license_image.front')->store($storagePath . '/license_image/front', 'public');
+            $additionalFields['license_image']['back'] = $request->file('license_image.back')->store($storagePath . '/license_image/back', 'public');
+
+            $additionalFields['driving_license_image']['front'] = $request->file('driving_license_image.front')->store($storagePath . '/driving_license_image/front', 'public');
+            $additionalFields['driving_license_image']['back'] = $request->file('driving_license_image.back')->store($storagePath . '/driving_license_image/back', 'public');
+
+            $additionalFields['id_card_image']['front'] = $request->file('id_card_image.front')->store($storagePath . '/id_card_image/front', 'public');
+            $additionalFields['id_card_image']['back'] = $request->file('id_card_image.back')->store($storagePath . '/id_card_image/back', 'public');
+
+        }
+
+
+        if ($data['user_type'] !== 'passenger') {
+            $user = $this->createUser(
+                array_merge($data, $additionalFields),
+                $data['user_type']
+            );
+        }
+
 
         if ($data['user_type'] === 'passenger') {
-            $otp = $this->otpService->createOtp($user->email);
-            Notification::route('mail', $user->email)->notify(new OTPNotification($otp));
-            event(new Registered($user));
-            Auth::guard('passenger')->login($user);
-            Notification::send($user, new PassengerVerficationNotification(['message' => 'OTP sent, Please verify your account']));
+            try {
+                DB::beginTransaction();
+                $otp = $this->otpService->createOtp($additionalFields['email']);
+                Notification::route('mail', $additionalFields['email'])->notify(new OTPNotification($otp));
+                DB::commit();
+            } catch (Exception $e) {
+                DB::rollBack();
+                return $this->responseMessageService->error('Error sending OTP. Please try again. ' . $e->getMessage());
 
+            }
             return response()->json([
-                'user' => $user,
-                'token' => $user->createToken('API Token')->plainTextToken,
                 'message' => 'OTP sent, please verify your email.',
-                'data' => ['email_verified_at' => $user->email_verified_at, 'OTP_expires_at' => now()->addMinutes(5)]
+                'data' => ['OTP_expires_at' => now()->addMinutes(5), 'user_type' => $data['user_type']]
             ], 201);
         }
 
         if ($data['user_type'] === 'driver') {
             $admins = User::all();
-            Notification::send($admins, new NewDriverNotification($user));
-            event(new Registered($user));
-            Auth::guard('driver')->login($user);
+            if ($admins->count()) {
+                Notification::send($admins, new NewDriverNotification($user));
+            }
             return response()->json([
                 'user' => $user,
-                'token' => $user->createToken('API Token')->plainTextToken,
                 'message' => 'Please wait for admin verfication...',
-                'data' => ['is_verified' => $user->is_verified]
+                'data' => ['is_verified' => $user->is_verified, 'user_type' => $data['user_type']]
             ], 201);
         }
 
-
-        event(new Registered($user));
-        Auth::guard('web')->login($user);
 
         return response()->json([
             'user' => $user,
             'token' => $user->createToken('API Token')->plainTextToken,
             'message' => 'Registration successful!',
+            'user_type' => $data['user_type']
         ], 201);
     }
 
@@ -132,7 +159,7 @@ class RegisteredUserController extends Controller
         if ($validated['email'] !== $request->user()->email) {
             return response()->json([
                 'message' => 'The email provided does not match your account email.',
-            ], 400);
+            ], 422);
         }
 
         // Check if the email is already verified
@@ -161,7 +188,21 @@ class RegisteredUserController extends Controller
             'otp' => 'required|integer',
         ]);
 
-        $otp = Otp::where('identifier', $request->user()->email)
+        $data = $request->validate([
+            'name' => 'required|string|max:255',
+            'password' => 'required|confirmed|min:8',
+            'email' => [
+                'required',
+                'email',
+                'unique:passengers,email',
+                'regex:/^[a-zA-Z0-9._%+-]+@gmail\.com$/'
+            ],
+            'phone_number' => 'required|string|max:15|regex:/^\+?[0-9]+$/',
+            'address' => 'nullable|string',
+            'user_type' => 'required|in:passenger',
+        ]);
+
+        $otp = Otp::where('identifier', $data['email'])
             ->where('otp_code', $validated['otp'])
             ->where('expires_at', '>', now())
             ->where('is_used', false)
@@ -171,20 +212,11 @@ class RegisteredUserController extends Controller
             return response()->json(['message' => 'Invalid or expired OTP'], 400);
         }
 
-        // Mark OTP as used
-        $otp->update(['is_used' => true]);
+        $user = Passenger::create(array_merge($data, ['email_verified_at' => now()]));
 
-        // if ($storedOtp != $validated['otp']) {
-        //     return response()->json(['message' => 'Incorrect OTP'], 400);
-        // }
-
-        // Mark user as verified (if applicable)
-        $request->user()->email_verified_at = now();
-        $request->user()->save();
-
-        Notification::send($request->user(), new PassengerVerficationNotification(['message' => 'OTP verified successfully!', 'email_verified_at' => now()]));
+        Notification::send($user, new PassengerVerficationNotification(['message' => 'OTP verified successfully!', 'email_verified_at' => now()]));
         $otp->delete();
-        return response()->json(['message' => 'OTP verified successfully!', 'email_verified_at' => now()], \Illuminate\Http\Response::HTTP_CREATED);
+        return response()->json(['message' => 'OTP verified successfully!', 'user' => $user, 'token' => $user->createToken('API Token')->plainTextToken, 'email_verified_at' => now(), 'user_type' => $data['user_type']], \Illuminate\Http\Response::HTTP_CREATED);
     }
 
     public function resendOtp(Request $request)
@@ -193,17 +225,11 @@ class RegisteredUserController extends Controller
             'email' => 'required|email',
         ]);
 
-        // Check if the email belongs to the authenticated user (if applicable)
-        if ($request->user() && $request->user()->email !== $validated['email']) {
-            return response()->json([
-                'error' => 'The provided email does not match your account.',
-            ], \Illuminate\Http\Response::HTTP_NOT_ACCEPTABLE);
-        }
-
+        $passenger = Passenger::where('email', $validated['email'])->first();
         // Check if the email is already verified
-        if ($request->user() && $request->user()->email_verified_at) {
+        if (isset($passenger)) {
             return response()->json([
-                'message' => 'This email is already verified at ' . $request->user()->email_verified_at,
+                'message' => 'This email is already verified at ' . $passenger->email_verified_at,
             ], \Illuminate\Http\Response::HTTP_BAD_REQUEST);
         }
 
@@ -213,6 +239,11 @@ class RegisteredUserController extends Controller
             ->orderBy('created_at', 'desc')
             ->first();
 
+        if (!$existingOtp) {
+            return response()->json([
+                'message' => 'This Email is not registered',
+            ], 400);
+        }
         // Check if an active OTP exists
         if ($existingOtp && now()->lessThan($existingOtp->expires_at)) {
             $remainingSeconds = now()->diffInSeconds($existingOtp->expires_at);
@@ -223,24 +254,30 @@ class RegisteredUserController extends Controller
             ], 429);
         }
 
-        // Generate a new OTP
-        $otp = random_int(100000, 999999);
 
-        // Save the new OTP in the database
-        OTP::create([
-            'identifier' => $validated['email'],
-            'otp_code' => $otp,
-            'expires_at' => now()->addMinutes(3),
-            'is_used' => false,
-        ]);
 
-        // Send the OTP securely without exposing it
-        Notification::route('mail', $validated['email'])
-            ->notify(new OTPNotification($otp));
-        Notification::send($request->user(), new PassengerVerficationNotification(['message' => 'OTP resent, Please verify your account']));
+        try {
+            $otp = random_int(100000, 999999);
+
+            Notification::route('mail', $validated['email'])
+                ->notify(new OTPNotification($otp));
+
+            OTP::create([
+                'identifier' => $validated['email'],
+                'otp_code' => $otp,
+                'expires_at' => now()->addMinutes(5),
+                'is_used' => false,
+            ]);
+        } catch (Exception $e) {
+            return response()->json([
+                'message' => 'Error sending OTP. ' . $e->getMessage(),
+            ], 500);
+        }
+
 
         return response()->json([
             'message' => 'OTP resent successfully! Please check your email.',
+            'OTP_expires_at' => now()->addMinutes(5)
         ], \Illuminate\Http\Response::HTTP_CREATED);
     }
 }

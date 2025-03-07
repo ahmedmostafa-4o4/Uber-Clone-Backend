@@ -21,11 +21,12 @@ class StoreFeedbackRequest extends FormRequest
     {
         return [
             'ride_id' => 'required|exists:rides,id',
-            'passenger_rating' => 'required|numeric|between:0,5',
-            'driver_rating' => 'required|numeric|between:0,5',
-            'comments' => 'nullable|string|max:1000',
-            'issues_reported' => 'nullable|string|max:1000',
-            'resolution_status' => 'required|in:pending,resolved,dismissed',
+            'passenger_id' => 'required|exists:passengers,id',
+            'driver_id' => 'required|exists:drivers,id',
+            'passenger_rating' => 'numeric|between:0,5',
+            'driver_rating' => 'numeric|between:0,5',
+            'passenger_comments' => 'nullable',
+            'driver_comments' => 'nullable'
         ];
     }
 
@@ -37,11 +38,14 @@ class StoreFeedbackRequest extends FormRequest
         return [
             'ride_id.required' => 'The ride ID is required.',
             'ride_id.exists' => 'The selected ride does not exist.',
+            'passenger_id.required' => 'The passenger ID is required.',
+            'passenger_id.exists' => 'The selected passenger does not exist.',
+            'driver_id.required' => 'The driver ID is required.',
+            'driver_id.exists' => 'The selected driver does not exist.',
             'passenger_rating.required' => 'Passenger rating is required.',
             'passenger_rating.between' => 'Passenger rating must be between 0 and 5.',
             'driver_rating.required' => 'Driver rating is required.',
             'driver_rating.between' => 'Driver rating must be between 0 and 5.',
-            'resolution_status.in' => 'Resolution status must be pending, resolved, or dismissed.',
         ];
     }
 }

@@ -17,19 +17,21 @@ class Passenger extends Authenticatable
         'phone_number',
         'address',
         'rating',
-        'trip_history',
         'saved_payment_methods',
         'email_verified_at',
         'password',
+        'customer_id',
     ];
 
     protected $hidden = [
         'password',
         'saved_payment_methods',
-
     ];
 
-
+    public function getSavedPaymentMethodsAttribute($value)
+    {
+        return json_decode($value, true) ?? [];
+    }
     /**
      * Get the attributes that should be cast.
      *
@@ -48,6 +50,8 @@ class Passenger extends Authenticatable
     {
         return $this->hasMany(Ride::class);
     }
-
-
+    public function feedbacks()
+    {
+        return $this->hasMany(Feedback::class);
+    }
 }

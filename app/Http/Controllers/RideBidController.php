@@ -23,10 +23,9 @@ class RideBidController extends Controller
             return response()->json(['message' => 'Invalid bid for this ride.'], 400);
         }
 
-        // تحديث حالة الرحلة والعرض
         $ride->update(['status' => 'accepted', 'driver_id' => $bid->driver_id, "fare" => $bid->price, "updated_at" => now()]);
-        // إشعار السائق
-        Notification::send($bid->driver, new BidAcceptedNotification($ride->toArray()));
+
+        Notification::send($bid->driver, new BidAcceptedNotification(['id' => $ride->id, 'passenger' => $ride->passenger->name, 'passenger_rating' => ['rate' => json_decode($ride->passenger->rating, true)['rate'], 'rate_count' => json_decode($ride->passenger->rating, true)['rate_count']], 'distance' => $ride->distance, 'status' => $ride->status, 'pickup_location' => json_decode($ride->pickup_location, true), 'dropoff_location' => json_decode($ride->dropoff_location, true)]));
 
         RideBid::where('ride_id', $rideId)->delete();
 
@@ -63,7 +62,13 @@ class RideBidController extends Controller
             return response()->json(['message' => 'No bids available for this ride.'], 400);
         }
 
-        $bids = RideBid::where('ride_id', $ride->id)->with(['driver', 'ride'])->get();
+        $bids = RideBid::where('ride_id', $ride->id)->with([
+            'driver',
+            'driver.feedbacks' => function ($query) {
+                $query->select('id', 'driver_id', 'driver_rating', 'passenger_comments');
+            },
+            'ride'
+        ])->get();
 
         return response()->json($bids);
     }

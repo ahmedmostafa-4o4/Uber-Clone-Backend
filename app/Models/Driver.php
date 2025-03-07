@@ -2,10 +2,12 @@
 
 namespace App\Models;
 
+use Exception;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Laravel\Sanctum\HasApiTokens;
 use Illuminate\Notifications\Notifiable;
+use Storage;
 class Driver extends Authenticatable
 {
     use HasFactory, Notifiable, HasApiTokens;
@@ -24,8 +26,9 @@ class Driver extends Authenticatable
         'license_plate',
         'car_color',
         'manufacturing_year',
-        'insurance_info',
-        'registration_info',
+        'id_card_image',
+        'license_image',
+        'driving_license_image',
         'is_verified'
     ];
 
@@ -44,14 +47,17 @@ class Driver extends Authenticatable
     {
         return $this->hasMany(Ride::class);
     }
-    public function verify()
+    public function feedbacks()
     {
-        $this->is_verified = 1;
-        $this->status = 'inactive';
+        return $this->hasMany(Feedback::class);
     }
-    public function decline()
+
+    public function deleteLicense()
     {
-        $this->is_verified = 0;
-        $this->status = 'inactive';
+        if (Storage::disk('public')->directoryExists('driver_licenses/' . $this->email)) {
+            if (!Storage::disk('public')->deleteDirectory('driver_licenses/' . $this->email)) {
+                throw new Exception('Error deleting account');
+            }
+        }
     }
 }

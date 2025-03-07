@@ -2,138 +2,158 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Driver;
+use App\Models\Passenger;
+use App\Models\User;
 use App\Notifications\OTPNotification;
 use App\OTPService;
+use Exception;
 use Hash;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\Rule;
 use Notification;
+use Storage;
+use Stripe\Customer;
+use Stripe\Exception\ApiErrorException;
+use Stripe\Stripe;
 
 class AuthController extends Controller
 {
     public function __construct(private OTPService $otpService)
     {
     }
-    /**
-     * @OA\Post(
-     *     path="/api/login",
-     *     tags={"Auth"},
-     *     summary="Login a user",
-     *     description="Handles user login for different user types.",
-     *     @OA\RequestBody(
-     *         required=true,
-     *         @OA\JsonContent(
-     *             required={"email","password","user_type"},
-     *             @OA\Property(property="email", type="string", example="user@gmail.com"),
-     *             @OA\Property(property="password", type="string", example="password123"),
-     *             @OA\Property(property="user_type", type="string", enum={"passenger","driver","admin"})
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=200,
-     *         description="Login successful.",
-     *         @OA\JsonContent(
-     *             @OA\Property(property="user", type="object"),
-     *             @OA\Property(property="token", type="string"),
-     *             @OA\Property(property="message", type="string")
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=422,
-     *         description="Validation error.",
-     *         @OA\JsonContent(
-     *             @OA\Property(property="error", type="string", example="Invalid input.")
-     *         )
-     *     )
-     * )
-     */
+
+    public function getToken(Request $request)
+    {
+        $user = $request->user(); // Get authenticated user
+
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized',
+            ], 401);
+        }
+
+        // Check if the user already has a token (if stored manually)
+        $existingToken = $user->tokens()->latest()->first();
+
+        if ($existingToken) {
+            return response()->json([
+                'success' => true,
+                'token' => $existingToken->plainTextToken,
+            ]);
+        }
+
+        // Generate a new token
+        $token = $user->createToken('auth_token');
+
+        return response()->json([
+            'success' => true,
+            'token' => $token->plainTextToken,
+        ]);
+    }
+
+    public function getAuth(Request $request)
+    {
+        $user = $request->user();
+
+        if ($user instanceof Passenger) {
+            $rides = $user->rides()->with(
+                'driver',
+            )->get();
+            return response()->json([
+                'user' => $user,
+                'user_type' => 'Passenger',
+                'rides' => $rides,
+                'feedbacks' => $user->feedbacks()->get(['id', 'passenger_id', 'passenger_rating', 'driver_comments'])
+            ]);
+        } elseif ($user instanceof Driver) {
+            $rides = $user->rides()->with(
+                'passenger',
+            )->get();
+            return response()->json([
+                'user' => $user,
+                'user_type' => 'Driver',
+                'rides' => $rides,
+                'feedbacks' => $user->feedbacks()->get(['id', 'driver_id', 'driver_rating', 'passenger_comments'])
+            ]);
+        }
+
+        return $user;
+    }
+
     public function login(Request $request)
     {
-        // Validate the incoming request data
         $request->validate([
             'email' => 'required|email|regex:/^[a-zA-Z0-9._%+-]+@gmail\.com$/',
             'password' => 'required',
             'user_type' => 'required|in:passenger,driver,admin',
         ], ['email.regex' => 'The email must be a valid Gmail address.']);
 
-        // Attempt to authenticate the user
-        $credentials = $request->only('email', 'password');
 
         if ($request->user_type === "passenger") {
-            if (Auth::guard('passenger')->attempt($credentials)) {
-                // Generate a new token
-                $request->session()->regenerate();
-                $user = Auth::guard('passenger')->user();
+            $user = Passenger::where('email', $request->email)->first();
+
+            if ($user && Hash::check($request->password, $user->password)) {
+                $user->tokens()->delete();
+
                 $token = $user->createToken('API Token')->plainTextToken;
 
-                if (!$user->email_verified_at) {
-                    $otp = $this->otpService->createOtp($user->email);
-                    Notification::route('mail', $user->email)->notify(new OTPNotification($otp));
-
-                    return response()->json([
-                        'user' => $user,
-                        'token' => $token,
-                        'message' => 'OTP sent, please verify your email.',
-                        'data' => ['email_verified_at' => $user->email_verified_at, 'OTP_expires_at' => now()->addMinutes(5)]
-                    ], 201);
-                }
                 return response()->json([
                     'user' => $user,
                     'token' => $token,
                     'message' => 'Login successful!',
                     'data' => ['email_verified_at' => $user->email_verified_at]
-                ], 200); // 200 for successful login
+                ], 200);
             }
         } elseif ($request->user_type === "driver") {
-            if (Auth::guard('driver')->attempt($credentials)) {
+            $user = Driver::where('email', $request->email)->first();
 
-                // Delete all existing tokens for the user to prevent multiple active sessions
-                $request->session()->regenerate();
-                $user = Auth::guard('driver')->user();
-                // Generate a new token
-                $token = $user->createToken('API Token')->plainTextToken;
+            if ($user && Hash::check($request->password, $user->password)) {
+
+                $user->tokens()->delete();
+
 
                 if ($user->is_verified === 'pending') {
                     return response()->json([
-                        'user' => $user,
-                        'token' => $token,
-                        'message' => 'Please wait for admin verfication.',
-                        'is_verified' => $user->is_verified
-                    ], 200); // 200 for successful login
+                        'user_type' => 'Driver',
+                        'message' => 'Please wait for admin verfication. Your account is pending!',
+                        'data' => ['is_verified' => $user->is_verified, 'user_type' => 'Driver'],
+                    ], 200);
                 } elseif ($user->is_verified == 0) {
                     return response()->json([
-                        'user' => $user,
-                        'token' => $token,
                         'message' => 'Your account has been declined!',
-                        'is_verified' => $user->is_verified
-                    ], 200); // 200 for successful login
+                        'data' => ['is_verified' => $user->is_verified, 'user_type' => 'Driver']
+                    ], 200);
                 }
 
                 $user->status = 'active';
                 $user->save();
+
+                $token = $user->createToken('API Token')->plainTextToken;
+
                 return response()->json([
                     'user' => $user,
                     'token' => $token,
                     'message' => 'Login Successfull!',
                     'is_verified' => $user->is_verified
-                ], 200); // 200 for successful login
+                ], 200);
             }
         } elseif ($request->user_type === "admin") {
-            if (Auth::guard('web')->attempt($credentials)) {
+            $user = User::where('email', $request->email)->first();
 
-                // Delete all existing tokens for the user to prevent multiple active sessions
-                $request->session()->regenerate();
-                $user = Auth::guard('web')->user();
+            if ($user && Hash::check($request->password, $user->password)) {
 
-                // Generate a new token
+                $user->tokens()->delete();
+
                 $token = $user->createToken('API Token')->plainTextToken;
 
                 return response()->json([
                     'user' => $user,
                     'token' => $token,
                     'message' => 'Login successful!',
-                ], 200); // 200 for successful login
+                ], 200);
             }
         } else {
             return response()->json([
@@ -144,35 +164,9 @@ class AuthController extends Controller
 
         return response()->json([
             'message' => 'Invalid credentials'
-        ], 401); // 401 for unauthorized access
+        ], 401);
     }
-    /**
-     * @OA\Post(
-     *     path="/api/change-password",
-     *     tags={"Auth"},
-     *     summary="Change user password",
-     *     @OA\RequestBody(
-     *         required=true,
-     *         @OA\JsonContent(
-     *             required={"current_password","password"},
-     *             @OA\Property(property="current_password", type="string", example="current_password123"),
-     *             @OA\Property(property="password", type="string", example="newpassword123"),
-     *             @OA\Property(property="password_confirmation", type="string", example="newpassword123")
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=200,
-     *         description="Password changed successfully.",
-     *         @OA\JsonContent(
-     *             @OA\Property(property="success", type="string", example="Your password has been changed.")
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=422,
-     *         description="Validation error."
-     *     )
-     * )
-     */
+
     public function changePassword(Request $request)
     {
         $request->validate([
@@ -187,68 +181,33 @@ class AuthController extends Controller
         return response()->json(['success' => 'Your password has been changed']);
     }
 
-    /**
-     * @OA\Put(
-     *     path="/api/user",
-     *     tags={"Auth"},
-     *     summary="Update user profile",
-     *     @OA\RequestBody(
-     *         required=false,
-     *         @OA\JsonContent(
-     *             @OA\Property(property="address", type="string", example="Cairo")
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=200,
-     *         description="Profile updated successfully.",
-     *         @OA\JsonContent(
-     *             @OA\Property(property="message", type="string", example="Your account has been updated successfully"),
-     *             @OA\Property(property="updated_data", type="object")
-     *         )
-     *     )
-     * )
-     */
+
 
     public function update(Request $request)
     {
         $user = $request->user();
 
-        // Determine user type based on the instance
-        if ($user instanceof \App\Models\Driver) {
+        if ($user instanceof Driver) {
             $user_type = 'driver';
-        } elseif ($user instanceof \App\Models\Passenger) {
+        } elseif ($user instanceof Passenger) {
             $user_type = 'passenger';
         } else {
             $user_type = 'admin';
         }
 
-        // Base validation
         $baseValidation = $request->validate([
             'name' => 'sometimes|string|max:255',
         ]);
 
-        // Additional validation based on user type
         $additionalFields = [];
         if ($user_type === 'passenger') {
             $additionalFields = $request->validate([
-                // 'email' => [
-                //     'sometimes',
-                //     'email',
-                //     'regex:/^[a-zA-Z0-9._%+-]+@gmail\.com$/',
-                //     Rule::unique('passengers', 'email')->ignore($user->id), // Ignore the current user's email
-                // ],
                 'phone_number' => 'sometimes|string|max:15|regex:/^\+?[0-9]+$/',
                 'address' => 'sometimes|nullable|string',
                 'saved_payment_methods' => 'sometimes|nullable',
             ], ['email.regex' => 'The email must be a valid Gmail address.']);
         } elseif ($user_type === 'driver') {
             $additionalFields = $request->validate([
-                // 'email' => [
-                //     'sometimes',
-                //     'email',
-                //     'regex:/^[a-zA-Z0-9._%+-]+@gmail\.com$/',
-                //     Rule::unique('drivers', 'email')->ignore($user->id), // Ignore the current user's email
-                // ],
                 'phone_number' => [
                     'sometimes',
                     'string',
@@ -258,110 +217,91 @@ class AuthController extends Controller
 
                 ],
                 'address' => 'sometimes|string',
+                'status' => 'sometimes|string|in:active,inactive',
             ], ['email.regex' => 'The email must be a valid Gmail address.']);
+
         } elseif ($user_type === 'admin') {
             $additionalFields = $request->validate([
                 'email' => [
                     'sometimes',
                     'email',
                     'regex:/^[a-zA-Z0-9._%+-]+@gmail\.com$/',
-                    Rule::unique('users', 'email')->ignore($user->id), // Ignore the current user's email
+                    Rule::unique('users', 'email')->ignore($user->id),
                 ],
             ], ['email.regex' => 'The email must be a valid Gmail address.']);
         }
 
-        // Combine all validated fields
         $fields = array_merge($baseValidation, $additionalFields);
 
-        // Update user information
         $user->fill($fields);
         $user->save();
 
         return response()->json(['message' => 'Your account has been updated successfully', 'updated_data' => $fields]);
     }
 
-    /**
-     * @OA\Post(
-     *     path="/api/logout",
-     *     tags={"Auth"},
-     *     summary="Logout user",
-     *     @OA\Response(
-     *         response=200,
-     *         description="Successfully logged out.",
-     *         @OA\JsonContent(
-     *             @OA\Property(property="message", type="string", example="Successfully logged out.")
-     *         )
-     *     )
-     * )
-     */
+
     public function logout(Request $request)
     {
         $user = $request->user();
 
         if ($user) {
-            // Handle user type-specific logout logic
-            if ($user instanceof \App\Models\Driver) {
+            if ($user instanceof Driver) {
                 $user->update(['status' => 'inactive']);
-                auth('driver')->logout();
-            } elseif ($user instanceof \App\Models\Passenger) {
-                auth('passenger')->logout();
-            } else {
-                auth('web')->logout();
             }
 
-            if (method_exists($user, 'currentAccessToken') && $user->currentAccessToken()) {
-                $user->currentAccessToken()->delete();
-            }
+            $user->currentAccessToken()->delete();
+
+            return response()->json(['message' => 'Successfully logged out.'], 200);
         }
 
-        // Invalidate session and regenerate CSRF token
-        $request->session()->invalidate();
-        $request->session()->regenerateToken();
-
-        return response()->json(['message' => 'Successfully logged out.'], 200);
+        return response()->json(['message' => 'User not found.'], 404);
     }
 
-    /**
-     * @OA\Delete(
-     *     path="/api/user",
-     *     tags={"Auth"},
-     *     summary="Delete my account",
-     *     @OA\RequestBody(
-     *         required=true,
-     *         @OA\JsonContent(
-     *             required={"password"},
-     *             @OA\Property(property="password", type="string", example="password123")
-     *         )
-     *     ),
-     *     
-     *     @OA\Response(
-     *         response=422,
-     *         description="Validation error."
-     *     )
-     * )
-     */
     public function destroy(Request $request)
     {
         $request->validate([
             'password' => ['required', 'current_password'],
         ]);
 
-        $user = $request->user();
-        if ($user instanceof \App\Models\Driver) {
-            auth('driver')->logout();
-        } elseif ($user instanceof \App\Models\Passenger) {
-            auth('passenger')->logout();
-        } else {
-            auth('web')->logout();
-        }
-        if ($token = $user->currentAccessToken()) {
-            $token->delete();
-        }
-        $user->delete();
-        $request->session()->invalidate();
-        $request->session()->regenerateToken();
+        $user = auth()->user();
 
-        return response()->noContent();
+        if (!$user) {
+            return response()->json(['message' => 'User not found'], 404);
+        }
+
+        $user->currentAccessToken()->delete();
+
+        if ($user instanceof Passenger && $user->customer_id) {
+            if ($stripeSecret = config('services.stripe.secret')) {
+                Stripe::setApiKey($stripeSecret);
+
+                try {
+                    $customer = Customer::retrieve($user->customer_id);
+                    $customer->delete();
+                } catch (ApiErrorException $e) {
+                    return response()->json(['message' => "Failed to delete Stripe customer: " . $e->getMessage()], 500);
+                }
+            } else {
+                return response()->json(['message' => 'Stripe API key not configured'], 500);
+            }
+        }
+
+        try {
+            if ($user instanceof Driver) {
+                if (Storage::disk('public')->directoryExists('driver_licenses/' . $user->email)) {
+                    if (!Storage::disk('public')->deleteDirectory('driver_licenses/' . $user->email)) {
+                        throw new Exception('Error deleting account');
+                    }
+                }
+            }
+            $user->delete();
+        } catch (Exception $e) {
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+
+
+
+        return response()->noContent(); // HTTP 204: No Content
     }
 
 }

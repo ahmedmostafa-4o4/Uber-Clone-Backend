@@ -25,8 +25,9 @@ return new class extends Migration {
             $table->string('license_plate');
             $table->string('car_color');
             $table->string('manufacturing_year');
-            $table->json('insurance_info');
-            $table->json('registration_info');
+            $table->json('id_card_image')->default(json_encode(['front' => null, 'back' => null]));
+            $table->json('license_image')->default(json_encode(['front' => null, 'back' => null]));
+            $table->json('driving_license_image')->default(json_encode(['front' => null, 'back' => null]));
             $table->enum('is_verified', [0, 1, 'pending'])->default('pending');
             $table->timestamps();
         });

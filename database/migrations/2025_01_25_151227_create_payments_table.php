@@ -14,7 +14,7 @@ return new class extends Migration {
             $table->id();
             $table->foreignId('ride_id')->constrained()->onDelete('cascade');
             $table->string('payment_method')->nullable();
-            $table->json('payment_method_detailes')->nullable();
+            $table->json('payment_method_details')->nullable();
             $table->string('payment_method_id')->nullable();
             $table->string('transaction_id')->nullable()->index();
             $table->string('currency')->nullable();

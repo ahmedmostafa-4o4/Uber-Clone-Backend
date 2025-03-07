@@ -6,14 +6,11 @@ use App\Http\Requests\StoreRideRequest;
 use App\Http\Requests\UpdateRideRequest;
 use App\Models\Driver;
 use App\Models\Ride;
-use App\Models\RideBid;
-use App\Notifications\BidAcceptedNotification;
 use App\Notifications\NewRideNotification;
 use App\Notifications\UpdateRideNotification;
 use Illuminate\Http\Request;
 use Illuminate\Notifications\DatabaseNotification;
 use Notification;
-use Response;
 
 class RideController extends Controller
 {
@@ -24,14 +21,21 @@ class RideController extends Controller
      */
     public function index()
     {
-        $Rides = auth()->user()->rides;
-        if ($Rides->isEmpty()) {
+        $rides = auth()->user()->rides;
+        if (!$rides) {
             return response()->json([
                 'message' => 'No rides found'
             ], 404);
         }
-        return response()->json($Rides);
+        return response()->json($rides);
     }
+
+    public function rides()
+    {
+        $rides = Ride::with(['driver', 'passenger', 'payment'])->get();
+        return response()->json($rides);
+    }
+
 
     public function driverRides(Request $request)
     {
@@ -73,6 +77,13 @@ class RideController extends Controller
         if (!($user instanceof \App\Models\Passenger)) {
             return response()->json(["success" => false, "message" => "Unauthorized Access"], 401);
         }
+
+        $lastRideStatus = $user->rides()->latest()->first()->status;
+
+        if ($lastRideStatus !== "canceled" && $lastRideStatus !== "completed") {
+            return response()->json(["success" => false, "message" => "You have an active ride"], 400);
+        }
+
         $request->validated();
         $ride = Ride::create([
             'region' => $request->region,
@@ -89,7 +100,7 @@ class RideController extends Controller
             return response()->json(['message' => 'There is no drivers available.'], 404);
         }
         foreach ($drivers as $driver) {
-            Notification::send($driver, new NewRideNotification($ride));
+            Notification::send($driver, new NewRideNotification(['id' => $ride->id, 'passenger' => $ride->passenger->name, 'passenger_rating' => ['rate' => json_decode($ride->passenger->rating, true)['rate'], 'rate_count' => json_decode($ride->passenger->rating, true)['rate_count']], 'distance' => $ride->distance, 'status' => $ride->status, 'pickup_location' => json_decode($ride->pickup_location, true), 'dropoff_location' => json_decode($ride->dropoff_location, true)]));
         }
 
         return response()->json(['message' => 'Ride request sent to drivers.', 'ride' => $ride]);
@@ -112,6 +123,24 @@ class RideController extends Controller
      */
     public function update(UpdateRideRequest $request, Ride $ride)
     {
+        $user = $request->user();
+        if ($user instanceof \App\Models\Passenger) {
+            if ($ride->passenger_id !== $request->user()->id) {
+                return response()->json([
+                    'message' => 'Unauthorized access'
+                ], 401);
+            }
+        }
+
+        if ($user instanceof Driver) {
+            if ($ride->driver_id !== $request->user()->id) {
+                return response()->json([
+                    'message' => 'Unauthorized access'
+                ], 401);
+            }
+        }
+
+
         try {
             $fields = $request->validated();
 
@@ -133,11 +162,16 @@ class RideController extends Controller
                 $ride->update($fields);
 
 
-                Notification::send([$ride->driver, $ride->passenger], new UpdateRideNotification($ride->toArray()));
+                if ($ride->driver && $ride->passenger) {
+                    Notification::send([$ride->passenger, $ride->driver], new UpdateRideNotification(['driver' => $ride->driver->name, 'passenger' => $ride->passenger->name, 'id' => $ride->id, 'start_time' => $ride->start_time, 'end_time' => $ride->end_time, 'status' => $ride->status, 'created_at' => $ride->created_at, 'distance' => $ride->distance]));
+                } else if ($ride->passenger) {
+                    Notification::send($ride->passenger, new UpdateRideNotification(['driver' => $ride->driver->name ?? "Driver not found", 'passenger' => $ride->passenger->name, 'id' => $ride->id, 'start_time' => $ride->start_time, 'end_time' => $ride->end_time, 'status' => $ride->status, 'created_at' => $ride->created_at, 'distance' => $ride->distance]));
+                }
 
                 return response()->json([
                     'success' => true,
-                    'data' => $ride,
+                    'data' => $ride->setRelations([])
+                    ,
                 ]);
             }
 

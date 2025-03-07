@@ -3,12 +3,11 @@
 namespace App\Notifications;
 
 use Illuminate\Bus\Queueable;
-use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
-
 class DriverVerficationNotification extends Notification
-{    use Queueable;
+{
+    use Queueable;
 
     private $message;
 
@@ -29,20 +28,15 @@ class DriverVerficationNotification extends Notification
      */
     public function via($notifiable)
     {
-        return ['database']; // Adjust based on your needs
+        return ['mail']; // Adjust based on your needs
     }
 
-    /**
-     * Get the array representation of the notification.
-     *
-     * @param mixed $notifiable
-     * @return array
-     */
-    public function toArray($notifiable)
+    public function toMail($notifiable)
     {
-        return [
-            'title' => 'Verfication message',
-            'message' => $this->message,
-        ];
+        return (new MailMessage)
+            ->subject('Verification Mail')
+            ->line($this->message);
     }
+
+
 }

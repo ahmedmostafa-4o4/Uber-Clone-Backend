@@ -27,14 +27,22 @@ class Ride extends Model
         ];
     }
 
-    public function passenger() {
+    public function passenger()
+    {
         return $this->belongsTo(Passenger::class);
     }
 
-    public function driver() {
+    public function payment()
+    {
+        return $this->hasMany(Payment::class);
+    }
+
+    public function driver()
+    {
         return $this->belongsTo(Driver::class);
     }
-    public function feedback() {
+    public function feedback()
+    {
         return $this->hasOne(Feedback::class);
     }
 }

@@ -4,7 +4,11 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\UpdateDriverRequest;
 use App\Models\Driver;
+use DB;
+use Exception;
 use Illuminate\Http\Request;
+use Log;
+use Storage;
 
 class DriverController extends Controller
 {
@@ -12,22 +16,9 @@ class DriverController extends Controller
      * Display a listing of the resource.
      */
 
-    /**
-     * @OA\Get(
-     *     path="/api/drivers",
-     *     summary="Get All Drivers",
-     *     description="Fetches all drivers with their associated rides",
-     *     @OA\Response(
-     *         response=200,
-     *         description="A list of drivers"
-     *      
-     *     ),
-     *     @OA\Response(response=404, description="No drivers found")
-     * )
-     */
     public function index()
     {
-        $drivers = Driver::with('rides')->get();
+        $drivers = Driver::with(['rides', 'feedbacks'])->get();
         if ($drivers->isEmpty()) {
             return response()->json([
                 'message' => 'No drivers found'
@@ -38,26 +29,6 @@ class DriverController extends Controller
 
     /**
      * Display the specified resource.
-     */
-
-    /**
-     * @OA\Get(
-     *     path="/api/drivers/{driverID}",
-     *     summary="Get a specific driver",
-     *     description="Fetches a driver by ID along with their associated rides",
-     *     @OA\Parameter(
-     *         name="driverID",
-     *         in="path",
-     *         description="ID of the driver",
-     *         required=true,
-     *         @OA\Schema(type="integer")
-     *     ),
-     *     @OA\Response(
-     *         response=200,
-     *         description="Details of the specific driver"
-     *     ),
-     *     @OA\Response(response=404, description="driver not found")
-     * )
      */
 
     public function show($driver)
@@ -87,7 +58,46 @@ class DriverController extends Controller
     public function update(UpdateDriverRequest $request, Driver $driver)
     {
         $fields = $request->validated();
-        $driver->update($fields);
+
+        if (!$driver) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Driver not found.'
+            ], 404);
+        }
+
+        $updateData = $fields;
+        $imageFields = ['license_image', 'driving_license_image', 'id_card_image'];
+
+        foreach ($imageFields as $field) {
+            if (isset($fields[$field])) {
+                // Decode existing images (if stored as JSON)
+                $existingImages = json_decode($driver->$field, true) ?? [];
+
+                foreach (['front', 'back'] as $side) {
+                    if (isset($fields[$field][$side])) {
+                        Log::info("Processing {$field} - {$side}");
+
+                        // Delete old image safely
+                        if (isset($existingImages[$side])) {
+                            Storage::disk('public')->delete($existingImages[$side]);
+                        }
+
+                        // Upload new image
+                        $existingImages[$side] = Storage::disk('public')->putFile(
+                            "driver_licenses/{$driver->email}/{$field}/{$side}",
+                            $fields[$field][$side]
+                        );
+                    }
+                }
+
+                // Update the field without losing the other side
+                $updateData[$field] = json_encode($existingImages);
+            }
+        }
+
+        $driver->update($updateData);
+
         return response()->json($driver, 200);
     }
 
@@ -95,66 +105,44 @@ class DriverController extends Controller
      * Remove the specified resource from storage.
      */
 
-    /**
-     * @OA\Delete(
-     *     path="/api/drivers",
-     *     summary="Delete multiple drivers",
-     *     description="Deletes multiple drivers by their IDs",
-     *     @OA\RequestBody(
-     *         required=true,
-     *         @OA\JsonContent(
-     *             required={"driver_ids"},
-     *             @OA\Property(property="driver_ids", type="array", @OA\Items(type="integer", example=1))
-     *         )
-     *     ),
-     *     @OA\Response(
-     *         response=200,
-     *         description="Drivers successfully deleted",
-     *         @OA\JsonContent(
-     *             type="object",
-     *             @OA\Property(property="success", type="boolean", example=true),
-     *             @OA\Property(property="message", type="string", example="2 passengers deleted successfully.")
-     *         )
-     *     ),
-     *     @OA\Response(response=404, description="No drivers found to delete.", @OA\JsonContent(
-     *             type="object",
-     *             @OA\Property(property="success", type="boolean", example=false),
-     *             @OA\Property(property="message", type="string", example="No drivers found to delete.")
-     *         ))
-     * )
-     */
+
     public function destroy(Request $request)
     {
-        // Validate that the 'passenger_ids' field exists and is an array
         $validated = $request->validate([
-            'driver_ids' => 'required|array',  // Ensuring 'passenger_ids' is an array
-            'driver_ids.*' => 'exists:drivers,id',  // Ensuring each ID exists in the passengers table
+            'driver_ids' => 'required|array|min:1',
+            'driver_ids.*' => 'exists:drivers,id',
         ]);
 
         $drivers = Driver::whereIn('id', $validated['driver_ids'])->get();
 
-        // Use the validated IDs to delete the passengers
+        DB::beginTransaction();
 
-        foreach ($drivers as $driver) {
-            // Delete all tokens associated with this passenger
-            $driver->tokens->each(function ($token) {
-                $token->delete();
-            });
-        }
+        try {
+            foreach ($drivers as $driver) {
 
-        $deletedCount = Driver::whereIn('id', $validated['driver_ids'])->delete();
+                $driver->deleteLicense();
 
+                if (isset($driver->tokens)) {
+                    $driver->tokens->each(fn($token) => $token->delete());
+                }
+            }
 
-        if ($deletedCount) {
+            $deletedCount = Driver::whereIn('id', $validated['driver_ids'])->delete();
+
+            DB::commit();
+
             return response()->json([
                 'success' => true,
                 'message' => "{$deletedCount} driver(s) deleted successfully.",
             ], 200);
-        } else {
+
+        } catch (Exception $e) {
+            DB::rollBack();
+
             return response()->json([
                 'success' => false,
-                'message' => 'No drivers found to delete.',
-            ], 404);
+                'message' => 'Error Deleting One or More Drivers. Please Try Again',
+            ], 500);
         }
     }
 }

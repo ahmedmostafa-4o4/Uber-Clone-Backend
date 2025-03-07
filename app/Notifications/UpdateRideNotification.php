@@ -30,7 +30,26 @@ class UpdateRideNotification extends Notification
      */
     public function via($notifiable)
     {
-        return ['database']; // Adjust based on your needs
+        return ['mail', 'database']; // Adjust based on your needs
+    }
+
+    public function toMail($notifiable)
+    {
+        return (new MailMessage)
+            ->subject('Updated Ride')
+            ->line('An updated ride is available!')
+            ->line('Ride ID: ' . $this->rideDetails['id'])
+            ->line('Driver Name: ' . $this->rideDetails['driver'])
+            ->line('Passenger Name: ' . $this->rideDetails['passenger'])
+            ->line('Start Time: ' . $this->rideDetails['start_time'])
+            ->line('End Time: ' . $this->rideDetails['end_time'])
+            ->line('Distance: ' . $this->rideDetails['distance'])
+            ->line('Status: ' . $this->rideDetails['status']);
+
+
+
+
+
     }
 
     /**
